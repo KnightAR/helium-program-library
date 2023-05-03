@@ -1,11 +1,12 @@
 import * as anchor from "@coral-xyz/anchor";
-import { GetProgramAccountsFilter, PublicKey } from "@solana/web3.js";
+import { AccountInfo, Commitment, GetProgramAccountsFilter, PublicKey } from "@solana/web3.js";
 import { Op, Sequelize } from "sequelize";
 import { SOLANA_URL } from "../env";
 import database from "./database";
 import { defineIdlModels } from "./defineIdlModels";
 import { sanitizeAccount } from "./sanitizeAccount";
 import { chunks } from "@helium/spl-utils";
+import { Program } from "@coral-xyz/anchor";
 
 export type Truthy<T> = T extends false | "" | 0 | null | undefined ? never : T; // from lodash
 
@@ -19,6 +20,66 @@ interface UpsertProgramAccountsArgs {
     schema?: string;
   }[];
   sequelize?: Sequelize;
+}
+
+const accumulateGpa = async(provider: anchor.Provider, program: Program, type: string, programId: PublicKey, filters: GetProgramAccountsFilter[]): 
+  Promise<
+    Array<{
+      publicKey: PublicKey;
+      account: AccountInfo<Buffer>;
+    }>
+  > => {
+    console.log("starting accumulation for type:", type);
+  const startTime = performance.now()
+
+  let resp: Array<{
+    pubkey: PublicKey;
+    account: AccountInfo<Buffer>;
+  }>;
+  try {
+    resp = await provider.connection.getProgramAccounts(programId, {
+      commitment: provider.connection.commitment,
+      filters,
+      dataSlice: {
+        offset: 0,
+        length: 1,
+      }
+    });
+  } catch (err) {
+    const endTime = performance.now()
+    console.log(`Failed after ${endTime - startTime} milliseconds`);
+    return [];
+  }
+  const endTime = performance.now()
+  console.log(`Succeeded ${endTime - startTime} milliseconds`)
+
+  console.log(`Fetched ${resp.length} accounts`);
+  const respChunks = chunks(resp, 100);
+
+  const finalAccounts:  Array<{publicKey: PublicKey; account: AccountInfo<Buffer>;}>= [];
+  for (let i = 0; i < respChunks.length; i++) {
+    process.stdout.write(`\r${i}/${respChunks.length}`);
+    const chunk = respChunks[i];
+    const accInfos = await provider.connection.getMultipleAccountsInfo(chunk.map((x) => x.pubkey));
+    const accs = accInfos
+        .map((acc, j) => {
+          // ignore accounts we cant decode
+          try {
+            return {
+              publicKey: chunk[j].pubkey,
+              account: program.coder.accounts.decode(type, acc.data),
+            };
+          } catch (_e) {
+            console.error(`Decode error ${chunk[j].pubkey.toString()}`, _e);
+            return null;
+          }
+        })
+        .filter(truthy);
+    finalAccounts.push(...accs);
+  }
+  console.log("");
+  console.log(`Final accounts remaining: ${finalAccounts.length}`);
+  return finalAccounts;
 }
 
 export const upsertProgramAccounts = async ({
@@ -48,11 +109,6 @@ export const upsertProgramAccounts = async ({
 
   try {
     await sequelize.authenticate();
-    await defineIdlModels({
-      idl,
-      accounts,
-      sequelize,
-    });
   } catch (e) {
     console.log(e);
   }
@@ -72,10 +128,7 @@ export const upsertProgramAccounts = async ({
       coderFilters.push({ dataSize: filter.dataSize });
     }
 
-    let resp = await provider.connection.getProgramAccounts(programId, {
-      commitment: provider.connection.commitment,
-      filters: [...coderFilters],
-    });
+    const resp = await accumulateGpa(provider, program, type, programId, [...coderFilters]);
 
     const model = sequelize.models[type];
     await model.sync({ alter: true });
@@ -84,25 +137,10 @@ export const upsertProgramAccounts = async ({
     const respChunks = chunks(resp, 1000);
     for (const chunk of respChunks) {
       const t = await sequelize.transaction();
-      const accs = chunk
-        .map(({ pubkey, account }) => {
-          // ignore accounts we cant decode
-          try {
-            return {
-              publicKey: pubkey,
-              account: program.coder.accounts.decode(type, account.data),
-            };
-          } catch (_e) {
-            console.error(`Decode error ${pubkey.toBase58()}`, _e);
-            return null;
-          }
-        })
-        .filter(truthy);
-
       try {
-        const updateOnDuplicateFields: string[] = Object.keys(accs[0].account);
+        const updateOnDuplicateFields: string[] = Object.keys(chunk[0].account);
         await model.bulkCreate(
-          accs.map(({ publicKey, account }) => ({
+          chunk.map(({ publicKey, account }) => ({
             address: publicKey.toBase58(),
             refreshed_at: now,
             ...sanitizeAccount(account),
