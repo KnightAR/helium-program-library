@@ -92,24 +92,8 @@ export const upsertProgramAccounts = async ({
 
       const model = sequelize.models[type];
       await model.sync({ alter: true });
-      const now = new Date();
-      const nowISO = now.toISOString();
+      const now = new Date().toISOString();
       const resChunks = chunks(resp, CHUNK_SIZE);
-
-      model.beforeBulkCreate(async (instances, _options) => {
-        for (const instance of instances) {
-          const existing = await model.findByPk(
-            instance.dataValues.address
-          );
-
-          if (
-            existing &&
-            new Date(existing.dataValues.refreshed_at) > now
-          ) {
-            instance.dataValues = existing.dataValues;
-          }
-        }
-      });
 
       for (const c of resChunks) {
         const t = await sequelize.transaction();
