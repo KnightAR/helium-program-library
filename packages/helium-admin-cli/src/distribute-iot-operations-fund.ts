@@ -1,51 +1,51 @@
-import * as anchor from '@coral-xyz/anchor';
-import * as client from '@helium/distributor-oracle';
+import * as anchor from "@coral-xyz/anchor";
+import * as client from "@helium/distributor-oracle";
 import {
   init as initHem,
   keyToAssetKey,
-} from '@helium/helium-entity-manager-sdk';
+} from "@helium/helium-entity-manager-sdk";
 import {
   init as initLazy,
   lazyDistributorKey,
   recipientKey,
-} from '@helium/lazy-distributor-sdk';
-import { init as initRewards } from '@helium/rewards-oracle-sdk';
-import { daoKey } from '@helium/helium-sub-daos-sdk';
+} from "@helium/lazy-distributor-sdk";
+import { init as initRewards } from "@helium/rewards-oracle-sdk";
+import { daoKey } from "@helium/helium-sub-daos-sdk";
 import {
   HNT_MINT,
   IOT_MINT,
   sendAndConfirmWithRetry,
   sendInstructions,
-} from '@helium/spl-utils';
-import { PublicKey } from '@solana/web3.js';
-import os from 'os';
-import yargs from 'yargs/yargs';
-import BN from "bn.js"
+} from "@helium/spl-utils";
+import { PublicKey } from "@solana/web3.js";
+import os from "os";
+import yargs from "yargs/yargs";
+import BN from "bn.js";
 
-const IOT_OPERATIONS_FUND = 'iot_operations_fund';
+const IOT_OPERATIONS_FUND = "iot_operations_fund";
 
-const MAX_CLAIM_AMOUNT = new BN("207020547945205")
+const MAX_CLAIM_AMOUNT = new BN("207020547945205");
 
 export async function run(args: any = process.argv) {
   const yarg = yargs(args).options({
     wallet: {
-      alias: 'k',
-      describe: 'Anchor wallet keypair',
+      alias: "k",
+      describe: "Anchor wallet keypair",
       default: `${os.homedir()}/.config/solana/id.json`,
     },
     url: {
-      alias: 'u',
-      default: 'http://127.0.0.1:8899',
-      describe: 'The solana url',
+      alias: "u",
+      default: "http://127.0.0.1:8899",
+      describe: "The solana url",
     },
     mint: {
-      type: 'string',
-      describe: 'Pubkey of the rewards mint',
+      type: "string",
+      describe: "Pubkey of the rewards mint",
       default: IOT_MINT.toBase58(),
     },
     hntMint: {
-      type: 'string',
-      describe: 'Mint address of hnt',
+      type: "string",
+      describe: "Mint address of hnt",
       default: HNT_MINT.toBase58(),
     },
   });
@@ -63,7 +63,7 @@ export async function run(args: any = process.argv) {
   const mint = new PublicKey(argv.mint);
   const [dao] = daoKey(new PublicKey(argv.hntMint));
   const [lazyDistributor] = lazyDistributorKey(mint);
-  const [keyToAsset] = keyToAssetKey(dao, IOT_OPERATIONS_FUND, 'utf8');
+  const [keyToAsset] = keyToAssetKey(dao, IOT_OPERATIONS_FUND, "utf8");
   const assetId = (await hemProgram.account.keyToAssetV0.fetch(keyToAsset))
     .asset;
 
@@ -82,9 +82,19 @@ export async function run(args: any = process.argv) {
     lazyDistributor,
     assetId
   );
+  const pending = await client.getPendingRewards(
+    lazyProgram,
+    lazyDistributor,
+    daoKey(HNT_MINT)[0],
+    [IOT_OPERATIONS_FUND],
+    "utf8"
+  );
   // Avoid claiming too much and tripping the breaker
-  if (new BN(rewards[0].currentRewards).gt(MAX_CLAIM_AMOUNT)) {
-    rewards[0].currentRewards = MAX_CLAIM_AMOUNT.toString();
+  if (new BN(pending[IOT_OPERATIONS_FUND]).gt(MAX_CLAIM_AMOUNT)) {
+    rewards[0].currentRewards = new BN(rewards[0].currentRewards)
+      .sub(new BN(pending[IOT_OPERATIONS_FUND]))
+      .add(MAX_CLAIM_AMOUNT)
+      .toString();
   }
 
   const tx = await client.formTransaction({
@@ -94,7 +104,7 @@ export async function run(args: any = process.argv) {
     rewards,
     asset: assetId,
     lazyDistributor,
-    encoding: 'utf8',
+    encoding: "utf8",
   });
 
   const signed = await provider.wallet.signTransaction(tx);
@@ -102,6 +112,6 @@ export async function run(args: any = process.argv) {
     provider.connection,
     signed.serialize(),
     { skipPreflight: true },
-    'confirmed'
+    "confirmed"
   );
 }
